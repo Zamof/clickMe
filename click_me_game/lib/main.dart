@@ -760,7 +760,11 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.pause_circle_outline, size: 100, color: Colors.white),
+              Icon(
+                Icons.play_circle_fill_outlined,
+                size: 100,
+                color: Colors.white,
+              ),
               SizedBox(height: 20),
               Text(
                 "GAME PAUSED",
@@ -791,8 +795,7 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
 
   void _loadBannerAd() {
     _bannerAd = BannerAd(
-      adUnitId:
-          'ca-app-pub-3940256099942544/6300978111', // Test banner ad unit ID
+      adUnitId: 'ca-app-pub-2471654882666627/4988722549', // Banner ad unit ID
       size: AdSize.banner,
       request: const AdRequest(),
       listener: BannerAdListener(
