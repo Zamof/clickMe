@@ -1,10 +1,17 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+enum GameMode { endless, timed }
+
+enum ButtonType { clickMe, dontClickMe, bonus, shieldButton, trap }
+
+enum PowerUpType { doubleScore, slowMotion, shield }
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -39,399 +46,540 @@ class ClickMeGameScreen extends StatefulWidget {
 
 class _ClickMeGameScreenState extends State<ClickMeGameScreen>
     with TickerProviderStateMixin {
-  // Game state
-  double _top = 100;
-  double _left = 100;
-  String _buttonText = 'Click me';
-  int _score = 0;
-  int _level = 1;
-  int _lives = 3;
-  bool _gameOver = false;
-  bool _gamePaused = false;
-  bool _isPowerUpActive = false;
-
-  // Timers and animations
-  Timer? _buttonTimer;
-  Timer? _powerUpTimer;
   final Random _random = Random();
   final AudioPlayer _audioPlayer = AudioPlayer();
 
-  // Animation controllers
-  late AnimationController _buttonAnimationController;
-  late AnimationController _scoreAnimationController;
-  late AnimationController _shakeAnimationController;
-  late Animation<double> _buttonScaleAnimation;
-  late Animation<double> _scoreScaleAnimation;
-  late Animation<double> _shakeAnimation;
+  bool _showMenu = true;
+  bool _gameOver = false;
+  bool _gamePaused = false;
+  bool _soundOn = true;
 
-  // UI state
+  GameMode _selectedMode = GameMode.endless;
+  ButtonType _buttonType = ButtonType.clickMe;
+  PowerUpType? _activePowerUp;
+
+  int _score = 0;
+  int _level = 1;
+  int _lives = 3;
+  int _combo = 0;
+  int _highestCombo = 0;
+  int _shieldCharges = 0;
+  int _buttonDisplayTime = 2200;
+  int _remainingTime = 60;
+
+  int _highScoreEndless = 0;
+  int _highScoreTimed = 0;
+
+  double _top = 200;
+  double _left = 100;
+  double _buttonSize = 90;
   Color _backgroundColor = Colors.white;
-  Color _buttonColor = Colors.blue;
-  int _highScore = 0;
-  double _buttonSize = 80;
-  int _buttonDisplayTime = 3000;
+  Color _buttonColor = Colors.blueAccent;
 
-  // Particle effects
-  List<Particle> _particles = [];
+  Timer? _buttonTimer;
+  Timer? _powerUpTimer;
+  Timer? _gameTimer;
   Timer? _particleTimer;
 
-  // AdMob banner ad
+  late AnimationController _buttonScaleController;
+  late Animation<double> _buttonScaleAnimation;
+  late AnimationController _shakeController;
+  late Animation<double> _shakeAnimation;
+
+  List<Particle> _particles = [];
+
   BannerAd? _bannerAd;
   bool _isBannerAdLoaded = false;
+
+  bool _missionScore20 = false;
+  bool _missionCombo5 = false;
+  bool _missionLevel3 = false;
+  bool _missionSelectedScore20 = false;
+  bool _missionSelectedCombo5 = false;
+  bool _missionSelectedLevel3 = false;
+  bool _powerUpShieldTimerActive = false;
 
   @override
   void initState() {
     super.initState();
     _initializeAnimations();
-    _loadHighScore();
+    _loadHighScores();
     _loadBannerAd();
-
-    // Set initial button position
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
-        setState(() {
-          _top = 200;
-          _left = 100;
-          _buttonText = 'Click me';
-        });
-        print('Initial button position set: (100, 200)');
-        _startGameLoop();
-      }
-    });
   }
 
   void _initializeAnimations() {
-    _buttonAnimationController = AnimationController(
-      duration: const Duration(milliseconds: 200),
+    _buttonScaleController = AnimationController(
+      duration: const Duration(milliseconds: 180),
       vsync: this,
     );
+    _buttonScaleAnimation = Tween<double>(begin: 1.0, end: 0.88).animate(
+      CurvedAnimation(parent: _buttonScaleController, curve: Curves.easeInOut),
+    );
 
-    _scoreAnimationController = AnimationController(
-      duration: const Duration(milliseconds: 300),
+    _shakeController = AnimationController(
+      duration: const Duration(milliseconds: 450),
       vsync: this,
     );
-
-    _shakeAnimationController = AnimationController(
-      duration: const Duration(milliseconds: 500),
-      vsync: this,
-    );
-
-    _buttonScaleAnimation = Tween<double>(begin: 1.0, end: 0.9).animate(
-      CurvedAnimation(
-        parent: _buttonAnimationController,
-        curve: Curves.easeInOut,
-      ),
-    );
-
-    _scoreScaleAnimation = Tween<double>(begin: 1.0, end: 1.3).animate(
-      CurvedAnimation(
-        parent: _scoreAnimationController,
-        curve: Curves.elasticOut,
-      ),
-    );
-
-    _shakeAnimation = Tween<double>(begin: 0.0, end: 10.0).animate(
-      CurvedAnimation(
-        parent: _shakeAnimationController,
-        curve: Curves.elasticOut,
-      ),
+    _shakeAnimation = Tween<double>(begin: 0.0, end: 16.0).animate(
+      CurvedAnimation(parent: _shakeController, curve: Curves.elasticIn),
     );
   }
 
-  void _startGameLoop() {
+  int get _currentMultiplier => min(1 + (_combo ~/ 5), 4);
+
+  String get _modeLabel {
+    return _selectedMode == GameMode.endless ? 'Endless' : 'Timed';
+  }
+
+  String _buttonLabel(ButtonType type) {
+    switch (type) {
+      case ButtonType.clickMe:
+        return 'Click me';
+      case ButtonType.dontClickMe:
+        return 'Don\'t click me';
+      case ButtonType.bonus:
+        return 'Bonus!';
+      case ButtonType.shieldButton:
+        return 'Shield';
+      case ButtonType.trap:
+        return 'Trap!';
+    }
+  }
+
+  Color _buttonTypeColor(ButtonType type) {
+    switch (type) {
+      case ButtonType.clickMe:
+        return Colors.blue.shade700;
+      case ButtonType.dontClickMe:
+        return Colors.red.shade700;
+      case ButtonType.bonus:
+        return Colors.purple.shade700;
+      case ButtonType.shieldButton:
+        return Colors.teal.shade700;
+      case ButtonType.trap:
+        return Colors.orange.shade900;
+    }
+  }
+
+  String _powerUpLabel(PowerUpType type) {
+    switch (type) {
+      case PowerUpType.doubleScore:
+        return 'Double Score';
+      case PowerUpType.slowMotion:
+        return 'Slow Motion';
+      case PowerUpType.shield:
+        return 'Shield';
+    }
+  }
+
+  void _startGame() {
+    _resetGameState();
+    setState(() {
+      _showMenu = false;
+      _gameOver = false;
+      _gamePaused = false;
+      _remainingTime = _selectedMode == GameMode.timed ? 60 : 0;
+    });
+    _moveButton();
+    _scheduleNextButton();
+    if (_selectedMode == GameMode.timed) {
+      _startGameTimer();
+    }
+  }
+
+  void _resetGameState() {
     _buttonTimer?.cancel();
-    _showNewButton();
+    _gameTimer?.cancel();
+    _powerUpTimer?.cancel();
+    _particleTimer?.cancel();
+
+    setState(() {
+      _score = 0;
+      _level = 1;
+      _lives = 3;
+      _combo = 0;
+      _highestCombo = 0;
+      _shieldCharges = 0;
+      _buttonSize = 90;
+      _buttonDisplayTime = 2200;
+      _backgroundColor = Colors.white;
+      _buttonColor = Colors.blueAccent;
+      _activePowerUp = null;
+      _powerUpSecondsLeft = 5;
+      _powerUpShieldTimerActive = false;
+      _particles.clear();
+      _missionScore20 = false;
+      _missionCombo5 = false;
+      _missionLevel3 = false;
+    });
   }
 
-  void _showNewButton() {
+  void _loadHighScores() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _highScoreEndless = prefs.getInt('high_score_endless') ?? 0;
+      _highScoreTimed = prefs.getInt('high_score_timed') ?? 0;
+    });
+  }
+
+  void _saveHighScore() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_selectedMode == GameMode.endless) {
+      if (_score > _highScoreEndless) {
+        _highScoreEndless = _score;
+        prefs.setInt('high_score_endless', _highScoreEndless);
+      }
+    } else {
+      if (_score > _highScoreTimed) {
+        _highScoreTimed = _score;
+        prefs.setInt('high_score_timed', _highScoreTimed);
+      }
+    }
+  }
+
+  void _loadBannerAd() {
+    const adUnitId = 'ca-app-pub-2471654882666627/6904439444';
+    _bannerAd = BannerAd(
+      adUnitId: adUnitId,
+      size: AdSize.banner,
+      request: const AdRequest(),
+      listener: BannerAdListener(
+        onAdLoaded: (ad) {
+          if (!mounted) return;
+          setState(() {
+            _isBannerAdLoaded = true;
+          });
+        },
+        onAdFailedToLoad: (ad, error) {
+          ad.dispose();
+          if (kDebugMode) {
+            debugPrint('Banner ad failed to load: $error');
+          }
+        },
+      ),
+    );
+    _bannerAd!.load();
+  }
+
+  void _scheduleNextButton() {
+    _buttonTimer?.cancel();
     if (_gameOver || _gamePaused) return;
 
-    final delay = Duration(
-      milliseconds: 500 + _random.nextInt(_buttonDisplayTime),
-    );
-
-    _buttonTimer = Timer(delay, () {
+    final displayTime =
+        _buttonDisplayTime +
+        (_activePowerUp == PowerUpType.slowMotion ? 900 : 0);
+    _buttonTimer = Timer(Duration(milliseconds: displayTime), () {
       if (!mounted || _gameOver || _gamePaused) return;
+      _moveButton();
+      _scheduleNextButton();
+    });
+  }
 
+  void _startGameTimer() {
+    _gameTimer?.cancel();
+    _gameTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_gamePaused || _gameOver) return;
       setState(() {
-        _buttonText = _random.nextBool() ? 'Click me' : "Don't click me";
-
-        // Get screen dimensions safely
-        final screenHeight = MediaQuery.of(context).size.height;
-        final screenWidth = MediaQuery.of(context).size.width;
-
-        // Ensure button stays within screen bounds with proper margins
-        _top = 150 + _random.nextDouble() * (screenHeight - 300);
-        _left = 50 + _random.nextDouble() * (screenWidth - 150);
-
-        // Adjust difficulty based on level
-        _buttonDisplayTime = max(800, 3000 - (_level * 200));
-        _buttonSize = max(60, 100 - (_level * 5));
-
-        _backgroundColor = _getRandomColor();
-        _buttonColor = _getRandomColor();
-
-        print(
-          'Button moved to: (${_left.toStringAsFixed(1)}, ${_top.toStringAsFixed(1)}) - Text: $_buttonText',
-        );
+        _remainingTime = max(0, _remainingTime - 1);
       });
-
-      _buttonAnimationController.forward().then((_) {
-        _buttonAnimationController.reverse();
-      });
-
-      // Continue the loop only if game is still active
-      if (!_gameOver && !_gamePaused) {
-        _showNewButton();
+      if (_remainingTime == 0) {
+        timer.cancel();
+        _finishGame();
       }
     });
   }
 
-  Color _getRandomColor() {
-    // Generate vibrant colors using HSV
-    final hue = _random.nextDouble() * 360;
-    final saturation = 0.7 + _random.nextDouble() * 0.3;
-    final value = 0.8 + _random.nextDouble() * 0.2;
+  void _moveButton() {
+    final screenSize = MediaQuery.of(context).size;
+    final maxTop = screenSize.height - 260;
+    final maxLeft = screenSize.width - 120;
 
-    // Convert HSV to RGB
-    final c = value * saturation;
-    final x = c * (1 - ((hue / 60) % 2 - 1).abs());
-    final m = value - c;
+    setState(() {
+      _buttonType = _chooseButtonType();
+      _top = 120 + _random.nextDouble() * max(0, maxTop - 120);
+      _left = 24 + _random.nextDouble() * max(0, maxLeft - 24);
+      _buttonSize = max(70, 110 - (_level * 4));
+      _buttonDisplayTime = max(900, 2200 - (_level * 170));
+      _backgroundColor = _generateColor();
+      _buttonColor = _buttonTypeColor(_buttonType);
+    });
 
-    double r, g, b;
-    if (hue < 60) {
-      r = c;
-      g = x;
-      b = 0;
-    } else if (hue < 120) {
-      r = x;
-      g = c;
-      b = 0;
-    } else if (hue < 180) {
-      r = 0;
-      g = c;
-      b = x;
-    } else if (hue < 240) {
-      r = 0;
-      g = x;
-      b = c;
-    } else if (hue < 300) {
-      r = x;
-      g = 0;
-      b = c;
-    } else {
-      r = c;
-      g = 0;
-      b = x;
-    }
-
-    return Color.fromARGB(
-      255,
-      ((r + m) * 255).round(),
-      ((g + m) * 255).round(),
-      ((b + m) * 255).round(),
-    );
+    _buttonScaleController.forward().then((_) {
+      _buttonScaleController.reverse();
+    });
   }
 
-  void _handleClick() async {
-    if (_buttonText == 'Click me') {
+  ButtonType _chooseButtonType() {
+    final chance = _random.nextDouble();
+    if (chance < 0.50) return ButtonType.clickMe;
+    if (chance < 0.72) return ButtonType.dontClickMe;
+    if (chance < 0.87) return ButtonType.bonus;
+    if (chance < 0.94) return ButtonType.shieldButton;
+    return ButtonType.trap;
+  }
+
+  Color _generateColor() {
+    final hue = _random.nextDouble() * 360;
+    final saturation = 0.68 + _random.nextDouble() * 0.22;
+    final value = 0.82 + _random.nextDouble() * 0.18;
+    return HSVColor.fromAHSV(1, hue, saturation, value).toColor();
+  }
+
+  void _handleClick() {
+    if (_gameOver || _gamePaused) return;
+    if (_buttonType == ButtonType.clickMe ||
+        _buttonType == ButtonType.bonus ||
+        _buttonType == ButtonType.shieldButton) {
       _handleCorrectClick();
     } else {
       _handleWrongClick();
     }
   }
 
-  void _handleCorrectClick() async {
+  void _handleCorrectClick() {
+    final basePoints = _buttonType == ButtonType.bonus
+        ? 3
+        : _buttonType == ButtonType.shieldButton
+        ? 2
+        : 1;
+    final points = basePoints * _currentMultiplier;
+
     setState(() {
-      _score++;
-      if (_score % 10 == 0) {
-        _level++;
-        _lives = min(5, _lives + 1); // Bonus life every 10 points
+      _score += points;
+      _combo += 1;
+      _highestCombo = max(_highestCombo, _combo);
+      _buttonColor = Colors.greenAccent.shade700;
+      _buttonDisplayTime = max(900, 2200 - (_level * 170));
+      if (_score >= 20) _missionScore20 = true;
+      if (_combo >= 5) _missionCombo5 = true;
+      while (_score >= _level * 10) {
+        _level += 1;
+        if (_level % 3 == 0 && _lives < 5) {
+          _lives += 1;
+        }
+      }
+      if (_level >= 3) _missionLevel3 = true;
+      if (_buttonType == ButtonType.shieldButton) {
+        _shieldCharges += 1;
       }
     });
 
-    // Animate score
-    _scoreAnimationController.forward().then((_) {
-      _scoreAnimationController.reverse();
+    _createParticles(Colors.green.shade400);
+    _buttonScaleController.forward().then((_) {
+      _buttonScaleController.reverse();
     });
+    _playSound('sounds/click.wav');
 
-    // Create particle effect
-    _createParticles(
-      _left + _buttonSize / 2,
-      _top + _buttonSize / 2,
-      Colors.green,
-    );
-
-    // Play sound
-    await _audioPlayer.play(AssetSource('sounds/click.wav'));
-
-    // Check for power-up activation
-    if (_random.nextDouble() < 0.1) {
-      // 10% chance
-      _activatePowerUp();
+    if (_activePowerUp == null && _random.nextDouble() < 0.18) {
+      _activateRandomPowerUp();
     }
+
+    _moveButton();
   }
 
-  void _handleWrongClick() async {
+  void _handleWrongClick() {
+    if (_shieldCharges > 0) {
+      setState(() {
+        _shieldCharges -= 1;
+        _buttonColor = Colors.cyan.shade700;
+      });
+      _createParticles(Colors.cyan.shade300);
+      _playSound('sounds/click.wav');
+      return;
+    }
+
     setState(() {
-      _lives--;
+      final damage = _buttonType == ButtonType.trap ? 2 : 1;
+      _lives = max(0, _lives - damage);
+      _combo = 0;
+      _buttonColor = Colors.redAccent.shade700;
       if (_lives <= 0) {
         _gameOver = true;
         _buttonTimer?.cancel();
       }
     });
 
-    // Shake animation
-    _shakeAnimationController.forward().then((_) {
-      _shakeAnimationController.reverse();
+    _createParticles(Colors.red.shade400);
+    _shakeController.forward().then((_) {
+      _shakeController.reverse();
     });
-
-    // Create particle effect
-    _createParticles(
-      _left + _buttonSize / 2,
-      _top + _buttonSize / 2,
-      Colors.red,
-    );
+    _playSound(_gameOver ? 'sounds/gameover.m4a' : 'sounds/click.wav');
 
     if (_gameOver) {
-      if (_score > _highScore) {
-        _highScore = _score;
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setInt('high_score', _highScore);
-      }
-      await _audioPlayer.play(AssetSource('sounds/gameover.m4a'));
-      _showGameOverDialog();
+      _finishGame();
     } else {
-      await _audioPlayer.play(AssetSource('sounds/click.wav'));
+      _moveButton();
     }
   }
 
-  void _activatePowerUp() {
+  void _activateRandomPowerUp() {
+    final powerUps = PowerUpType.values;
+    final powerUp = powerUps[_random.nextInt(powerUps.length)];
     setState(() {
-      _isPowerUpActive = true;
+      _activePowerUp = powerUp;
     });
 
+    if (powerUp == PowerUpType.shield) {
+      _shieldCharges += 1;
+      _powerUpShieldTimerActive = true;
+    }
+
     _powerUpTimer?.cancel();
-    _powerUpTimer = Timer(const Duration(seconds: 5), () {
+    _powerUpTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
       setState(() {
-        _isPowerUpActive = false;
+        _powerUpTimerTick();
       });
     });
   }
 
-  void _createParticles(double x, double y, Color color) {
-    for (int i = 0; i < 8; i++) {
+  int _powerUpSecondsLeft = 5;
+
+  void _powerUpTimerTick() {
+    _powerUpSecondsLeft = max(0, _powerUpSecondsLeft - 1);
+    if (_powerUpSecondsLeft == 0) {
+      _powerUpTimer?.cancel();
+      if (_activePowerUp == PowerUpType.shield && _powerUpShieldTimerActive) {
+        if (_shieldCharges > 0) {
+          _shieldCharges -= 1;
+        }
+        _powerUpShieldTimerActive = false;
+      }
+      _activePowerUp = null;
+      _powerUpSecondsLeft = 5;
+    }
+  }
+
+  void _finishGame() {
+    if (!_gameOver) {
+      setState(() {
+        _gameOver = true;
+      });
+    }
+    _saveHighScore();
+    _showGameOverDialog();
+  }
+
+  void _playSound(String assetPath) {
+    if (!_soundOn) return;
+    _audioPlayer.play(AssetSource(assetPath));
+  }
+
+  void _createParticles(Color color) {
+    final centerX = _left + _buttonSize / 2;
+    final centerY = _top + _buttonSize / 2;
+    for (var i = 0; i < 12; i++) {
       _particles.add(
         Particle(
-          x: x,
-          y: y,
-          vx: (_random.nextDouble() - 0.5) * 200,
-          vy: (_random.nextDouble() - 0.5) * 200,
+          x: centerX,
+          y: centerY,
+          vx: (_random.nextDouble() - 0.5) * 180,
+          vy: (_random.nextDouble() - 0.5) * 180,
           color: color,
-          life: 1.0,
         ),
       );
     }
 
     _particleTimer?.cancel();
-    _particleTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+    _particleTimer = Timer.periodic(const Duration(milliseconds: 24), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
       setState(() {
-        _particles.removeWhere((particle) {
-          particle.update();
-          return particle.life <= 0;
-        });
+        _particles.removeWhere((particle) => particle.update());
       });
-
       if (_particles.isEmpty) {
         timer.cancel();
       }
     });
   }
 
-  void _resetGame() {
-    setState(() {
-      _score = 0;
-      _level = 1;
-      _lives = 3;
-      _gameOver = false;
-      _gamePaused = false;
-      _isPowerUpActive = false;
-      _backgroundColor = Colors.white;
-      _buttonColor = Colors.blue;
-      _buttonSize = 80;
-      _buttonDisplayTime = 3000;
-      _particles.clear();
-    });
-    _startGameLoop();
-  }
-
   void _togglePause() {
+    if (_gameOver) return;
     setState(() {
       _gamePaused = !_gamePaused;
     });
-
     if (_gamePaused) {
       _buttonTimer?.cancel();
-      print('Game paused - timer cancelled');
+      _gameTimer?.cancel();
     } else {
-      // Resume the game loop by starting a new button cycle
-      if (!_gameOver) {
-        print('Game resumed - starting new button cycle');
-        _showNewButton();
-      } else {
-        print('Cannot resume - game is over');
+      _scheduleNextButton();
+      if (_selectedMode == GameMode.timed) {
+        _startGameTimer();
       }
     }
   }
 
+  void _returnToMenu() {
+    _buttonTimer?.cancel();
+    _gameTimer?.cancel();
+    _powerUpTimer?.cancel();
+    _particleTimer?.cancel();
+    setState(() {
+      _showMenu = true;
+      _gamePaused = false;
+      _gameOver = false;
+    });
+  }
+
   void _showGameOverDialog() {
-    showDialog(
+    showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text(
-          "Game Over!",
-          style: TextStyle(color: Colors.white, fontSize: 24),
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              "Final Score: $_score",
-              style: const TextStyle(color: Colors.white, fontSize: 20),
-            ),
-            const SizedBox(height: 10),
-            Text(
-              "Level Reached: $_level",
-              style: const TextStyle(color: Colors.white, fontSize: 18),
-            ),
-            if (_score > _highScore) ...[
-              const SizedBox(height: 10),
-              const Text(
-                "🎉 New High Score! 🎉",
-                style: TextStyle(
-                  color: Colors.yellow,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                ),
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: const Text('Game Over', style: TextStyle(color: Colors.white)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Score: $_score',
+                style: const TextStyle(color: Colors.white),
               ),
+              Text(
+                'Level: $_level',
+                style: const TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Mode: $_modeLabel',
+                style: const TextStyle(color: Colors.white70),
+              ),
+              if ((_selectedMode == GameMode.endless
+                  ? _score > _highScoreEndless
+                  : _score > _highScoreTimed)) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  '🎉 New High Score!',
+                  style: TextStyle(color: Colors.amber),
+                ),
+              ],
             ],
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.of(context).pop();
-              _resetGame();
-            },
-            child: const Text(
-              "Play Again",
-              style: TextStyle(color: Colors.blue, fontSize: 18),
-            ),
           ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _returnToMenu();
+              },
+              child: const Text('Menu'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _startGame();
+              },
+              child: const Text('Play Again'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -439,11 +587,12 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
   void dispose() {
     _buttonTimer?.cancel();
     _powerUpTimer?.cancel();
+    _gameTimer?.cancel();
     _particleTimer?.cancel();
-    _buttonAnimationController.dispose();
-    _scoreAnimationController.dispose();
-    _shakeAnimationController.dispose();
+    _buttonScaleController.dispose();
+    _shakeController.dispose();
     _bannerAd?.dispose();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -455,32 +604,335 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
           gradient: LinearGradient(
             begin: Alignment.topLeft,
             end: Alignment.bottomRight,
-            colors: [_backgroundColor, _backgroundColor.withValues(alpha: 0.8)],
+            colors: _showMenu
+                ? [
+                    const Color.fromARGB(255, 48, 59, 177),
+                    const Color.fromARGB(255, 54, 116, 146),
+                  ]
+                : [_backgroundColor, _backgroundColor.withValues(alpha: 0.8)],
           ),
         ),
         child: Stack(
           children: [
-            // Game UI
-            _buildGameUI(),
-
-            // Particles
+            if (_showMenu) _buildMenu(),
+            if (!_showMenu) _buildGameBoard(),
             ..._particles.map((particle) => particle.build()),
-
-            // Power-up indicator
-            if (_isPowerUpActive) _buildPowerUpIndicator(),
-
-            // Pause overlay
-            if (_gamePaused) _buildPauseOverlay(),
+            if (_activePowerUp != null) _buildPowerUpBadge(),
+            if (!_showMenu && _gamePaused) _buildPauseOverlay(),
+            if (!_showMenu && !_gameOver)
+              Positioned(
+                top: 50,
+                left: 22,
+                child: IconButton(
+                  onPressed: _toggleSound,
+                  icon: Icon(
+                    _soundOn ? Icons.volume_up : Icons.volume_off,
+                    color: const Color.fromARGB(255, 133, 96, 96),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildGameUI() {
+  void _toggleSound() {
+    setState(() {
+      _soundOn = !_soundOn;
+    });
+  }
+
+  Widget _buildMenu() {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Click Me',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 36,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Select mode, choose missions, then tap play.',
+              style: TextStyle(
+                color: const Color.fromARGB(179, 183, 209, 205),
+                fontSize: 16,
+              ),
+            ),
+            const SizedBox(height: 24),
+            _buildModeSelector(),
+            const SizedBox(height: 24),
+            _buildMissionPanel(),
+            const SizedBox(height: 24),
+            _buildInstructionsPanel(),
+            const Spacer(),
+            _buildHighScorePanel(),
+            const SizedBox(height: 16),
+            _buildButtonsRow(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeSelector() {
+    return Row(
+      children: [
+        _buildModeChip(GameMode.endless, 'Endless'),
+        const SizedBox(width: 12),
+        _buildModeChip(GameMode.timed, 'Timed'),
+      ],
+    );
+  }
+
+  Widget _buildModeChip(GameMode mode, String label) {
+    final selected = _selectedMode == mode;
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      selectedColor: Colors.blueAccent,
+      backgroundColor: Colors.white24,
+      labelStyle: TextStyle(
+        color: selected ? Colors.white : const Color.fromARGB(179, 173, 96, 96),
+        fontWeight: FontWeight.bold,
+      ),
+      onSelected: (_) {
+        setState(() {
+          _selectedMode = mode;
+        });
+      },
+    );
+  }
+
+  Widget _buildMissionPanel() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.24),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Missions',
+            style: TextStyle(
+              color: Color.fromARGB(255, 187, 191, 211),
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 12),
+          _buildMissionRow(
+            'Score 20 points in one game',
+            _missionScore20,
+            _missionSelectedScore20,
+            () => _toggleMissionSelection(1),
+          ),
+          _buildMissionRow(
+            'Build a combo of 5',
+            _missionCombo5,
+            _missionSelectedCombo5,
+            () => _toggleMissionSelection(2),
+          ),
+          _buildMissionRow(
+            'Reach level 3',
+            _missionLevel3,
+            _missionSelectedLevel3,
+            () => _toggleMissionSelection(3),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMissionRow(
+    String label,
+    bool complete,
+    bool selected,
+    VoidCallback onTap,
+  ) {
+    final icon = complete
+        ? selected
+              ? Icons.check_circle
+              : Icons.check_circle_outline
+        : selected
+        ? Icons.check_box
+        : Icons.check_box_outline_blank;
+    final iconColor = complete
+        ? Colors.greenAccent
+        : selected
+        ? Colors.lightBlueAccent
+        : Colors.white54;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+          decoration: BoxDecoration(
+            color: selected ? Colors.white.withValues(alpha: 0.08) : null,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, color: iconColor, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: complete || selected ? Colors.white : Colors.white70,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _toggleMissionSelection(int missionId) {
+    setState(() {
+      if (missionId == 1) {
+        _missionSelectedScore20 = !_missionSelectedScore20;
+      } else if (missionId == 2) {
+        _missionSelectedCombo5 = !_missionSelectedCombo5;
+      } else if (missionId == 3) {
+        _missionSelectedLevel3 = !_missionSelectedLevel3;
+      }
+    });
+  }
+
+  Widget _buildInstructionsPanel() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: const [
+          Text(
+            'How It Works',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          SizedBox(height: 12),
+          Text(
+            '• Tap the active button and avoid wrong targets.',
+            style: TextStyle(
+              color: Color.fromARGB(179, 210, 217, 226),
+              fontSize: 14,
+            ),
+          ),
+          SizedBox(height: 8),
+          Text(
+            '• Build combos to increase your score multiplier.',
+            style: TextStyle(
+              color: Color.fromARGB(179, 210, 217, 226),
+              fontSize: 14,
+            ),
+          ),
+          SizedBox(height: 8),
+          Text(
+            '• Power-ups appear randomly and last for a short time.',
+            style: TextStyle(
+              color: Color.fromARGB(179, 210, 217, 226),
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHighScorePanel() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Best Scores',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Endless', style: TextStyle(color: Colors.white70)),
+              Text(
+                '$_highScoreEndless',
+                style: const TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Timed', style: TextStyle(color: Colors.white70)),
+              Text(
+                '$_highScoreTimed',
+                style: const TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildButtonsRow() {
+    return Row(
+      children: [
+        Expanded(
+          child: ElevatedButton(
+            onPressed: _startGame,
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blueAccent,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+            child: const Text(
+              'Play',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGameBoard() {
     return Column(
       children: [
-        // App bar with game info
         Container(
           padding: const EdgeInsets.only(
             top: 50,
@@ -489,259 +941,243 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
             bottom: 20,
           ),
           decoration: BoxDecoration(
-            color: Colors.black.withValues(alpha: 0.1),
+            color: Colors.black.withValues(alpha: 0.20),
             borderRadius: const BorderRadius.only(
-              bottomLeft: Radius.circular(20),
-              bottomRight: Radius.circular(20),
+              bottomLeft: Radius.circular(24),
+              bottomRight: Radius.circular(24),
             ),
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          child: Column(
             children: [
-              // Score and level
-              Expanded(
-                flex: 3,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    AnimatedBuilder(
-                      animation: _scoreScaleAnimation,
-                      builder: (context, child) {
-                        return Transform.scale(
-                          scale: _scoreScaleAnimation.value,
-                          child: Text(
-                            "Score: $_score",
-                            style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                              shadows: [
-                                Shadow(
-                                  offset: Offset(2, 2),
-                                  blurRadius: 4,
-                                  color: Colors.black54,
-                                ),
-                              ],
-                            ),
-                            overflow: TextOverflow.ellipsis,
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Score: $_score',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
                           ),
-                        );
-                      },
-                    ),
-                    Text(
-                      "Level: $_level",
-                      style: const TextStyle(
-                        fontSize: 14,
-                        color: Colors.white70,
-                        shadows: [
-                          Shadow(
-                            offset: Offset(1, 1),
-                            blurRadius: 2,
-                            color: Colors.black54,
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Combo: $_combo x$_currentMultiplier',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 14,
                           ),
-                        ],
-                      ),
-                      overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
-
-              // High score
-              Expanded(
-                flex: 2,
-                child: Text(
-                  "High: $_highScore",
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: Colors.white70,
-                    shadows: [
-                      Shadow(
-                        offset: Offset(1, 1),
-                        blurRadius: 2,
-                        color: Colors.black54,
-                      ),
-                    ],
                   ),
-                  textAlign: TextAlign.center,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                  if (_selectedMode == GameMode.timed)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          'Time: $_remainingTime',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Mode: $_modeLabel',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  if (_selectedMode == GameMode.endless)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(
+                          'Mode: $_modeLabel',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'High: ${_selectedMode == GameMode.endless ? _highScoreEndless : _highScoreTimed}',
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
               ),
-
-              // Lives and pause button
-              Expanded(
-                flex: 3,
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
+              const SizedBox(height: 14),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
                     children: [
-                      // Lives
-                      ...List.generate(5, (index) {
-                        return Container(
-                          margin: const EdgeInsets.only(right: 2),
-                          child: Icon(
-                            index < _lives
-                                ? Icons.favorite
-                                : Icons.favorite_border,
-                            color: index < _lives ? Colors.red : Colors.white54,
-                            size: 16,
-                          ),
-                        );
-                      }),
-                      const SizedBox(width: 8),
-                      // Pause button
-                      IconButton(
-                        onPressed: _togglePause,
-                        icon: Icon(
-                          _gamePaused ? Icons.play_arrow : Icons.pause,
-                          color: Colors.white,
-                          size: 22,
+                      for (var i = 0; i < 5; i++)
+                        Icon(
+                          i < _lives ? Icons.favorite : Icons.favorite_border,
+                          color: i < _lives ? Colors.red : Colors.white54,
+                          size: 18,
                         ),
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(
-                          minWidth: 36,
-                          minHeight: 36,
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      InkWell(
+                        onTap: _togglePause,
+                        borderRadius: BorderRadius.circular(16),
+                        child: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.12),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            _gamePaused ? Icons.play_arrow : Icons.pause,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      InkWell(
+                        onTap: _returnToMenu,
+                        borderRadius: BorderRadius.circular(16),
+                        child: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withValues(alpha: 0.12),
+                            shape: BoxShape.circle,
+                          ),
+                          child: const Icon(
+                            Icons.home,
+                            color: Colors.white,
+                            size: 20,
+                          ),
                         ),
                       ),
                     ],
                   ),
-                ),
+                ],
               ),
             ],
           ),
         ),
-        // Game area
         Expanded(
           child: Stack(
             children: [
-              // Game button
               if (!_gameOver && !_gamePaused)
                 Positioned(
                   top: _top,
                   left: _left,
                   child: AnimatedBuilder(
-                    animation: _shakeAnimation,
+                    animation: Listenable.merge([
+                      _buttonScaleController,
+                      _shakeController,
+                    ]),
                     builder: (context, child) {
+                      final shake =
+                          _shakeAnimation.value * (_random.nextDouble() - 0.5);
                       return Transform.translate(
-                        offset: Offset(
-                          _shakeAnimation.value * (_random.nextDouble() - 0.5),
-                          _shakeAnimation.value * (_random.nextDouble() - 0.5),
-                        ),
-                        child: AnimatedBuilder(
-                          animation: _buttonScaleAnimation,
-                          builder: (context, child) {
-                            return Transform.scale(
-                              scale: _buttonScaleAnimation.value,
-                              child: Container(
-                                width: _buttonSize,
-                                height: _buttonSize,
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(
-                                    _buttonSize / 2,
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: _buttonColor.withValues(
-                                        alpha: 0.6,
-                                      ),
-                                      blurRadius: 20,
-                                      spreadRadius: 5,
-                                    ),
-                                  ],
-                                ),
-                                child: Material(
-                                  color: Colors.transparent,
-                                  child: InkWell(
-                                    borderRadius: BorderRadius.circular(
-                                      _buttonSize / 2,
-                                    ),
-                                    onTap: _handleClick,
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        borderRadius: BorderRadius.circular(
-                                          _buttonSize / 2,
-                                        ),
-                                        gradient: LinearGradient(
-                                          begin: Alignment.topLeft,
-                                          end: Alignment.bottomRight,
-                                          colors: [
-                                            _buttonColor,
-                                            _buttonColor.withValues(alpha: 0.8),
-                                          ],
-                                        ),
-                                      ),
-                                      child: Center(
-                                        child: Text(
-                                          _buttonText,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 16,
-                                            fontWeight: FontWeight.bold,
-                                            shadows: [
-                                              Shadow(
-                                                offset: Offset(1, 1),
-                                                blurRadius: 2,
-                                                color: Colors.black54,
-                                              ),
-                                            ],
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          },
+                        offset: Offset(shake, shake),
+                        child: Transform.scale(
+                          scale: _buttonScaleAnimation.value,
+                          child: child,
                         ),
                       );
                     },
+                    child: SizedBox(
+                      width: _buttonSize,
+                      height: _buttonSize,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(_buttonSize),
+                          ),
+                          backgroundColor: _buttonColor,
+                          elevation: 14,
+                          shadowColor: _buttonColor.withValues(alpha: 0.5),
+                        ),
+                        onPressed: _handleClick,
+                        child: Text(
+                          _buttonLabel(_buttonType),
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
             ],
           ),
         ),
-        // Banner ad
-        if (_isBannerAdLoaded)
-          Container(
+        if (_isBannerAdLoaded && _bannerAd != null)
+          SizedBox(
+            width: _bannerAd!.size.width.toDouble(),
             height: _bannerAd!.size.height.toDouble(),
-            width: double.infinity,
             child: AdWidget(ad: _bannerAd!),
           ),
       ],
     );
   }
 
-  Widget _buildPowerUpIndicator() {
+  Widget _buildPowerUpBadge() {
+    if (_activePowerUp == null && _shieldCharges == 0) {
+      return const SizedBox.shrink();
+    }
+
+    final icon = _activePowerUp == PowerUpType.doubleScore
+        ? Icons.score
+        : _activePowerUp == PowerUpType.slowMotion
+        ? Icons.slow_motion_video
+        : Icons.shield;
+    final label = _activePowerUp != null
+        ? '${_powerUpLabel(_activePowerUp!)} ($_powerUpSecondsLeft)s'
+        : 'Shield Ready';
+
     return Positioned(
-      top: 100,
-      right: 20,
+      top: 96,
+      right: 18,
       child: Container(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.yellow.withValues(alpha: 0.9),
-          borderRadius: BorderRadius.circular(10),
+          color: Colors.yellow.withValues(alpha: 0.92),
+          borderRadius: BorderRadius.circular(12),
           boxShadow: [
             BoxShadow(
-              color: Colors.yellow.withValues(alpha: 0.5),
-              blurRadius: 10,
+              color: Colors.yellow.withValues(alpha: 0.22),
+              blurRadius: 12,
               spreadRadius: 2,
             ),
           ],
         ),
-        child: const Row(
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.flash_on, color: Colors.orange),
-            SizedBox(width: 5),
+            Icon(icon, color: Colors.orange),
+            const SizedBox(width: 8),
             Text(
-              "POWER UP, ENJOY!!",
-              style: TextStyle(
-                color: Colors.orange,
+              label,
+              style: const TextStyle(
+                color: Colors.black,
                 fontWeight: FontWeight.bold,
-                fontSize: 16,
               ),
             ),
           ],
@@ -751,75 +1187,46 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
   }
 
   Widget _buildPauseOverlay() {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: _togglePause,
-      child: Container(
-        color: Colors.black.withValues(alpha: 0.7),
-        child: const Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.play_circle_fill_outlined,
-                size: 100,
-                color: Colors.white,
-              ),
-              SizedBox(height: 20),
-              Text(
-                "GAME PAUSED",
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 32,
-                  fontWeight: FontWeight.bold,
+    return Positioned.fill(
+      child: GestureDetector(
+        onTap: _togglePause,
+        child: Container(
+          color: Colors.black.withValues(alpha: 0.72),
+          child: const Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.play_circle_fill, size: 100, color: Colors.white),
+                SizedBox(height: 18),
+                Text(
+                  'GAME PAUSED',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
-              ),
-              SizedBox(height: 10),
-              Text(
-                "Tap the pause button to resume",
-                style: TextStyle(color: Colors.white70, fontSize: 18),
-              ),
-            ],
+                SizedBox(height: 8),
+                Text(
+                  'Tap anywhere to resume',
+                  style: TextStyle(color: Colors.white70, fontSize: 16),
+                ),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
-
-  Future<void> _loadHighScore() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _highScore = prefs.getInt('high_score') ?? 0;
-    });
-  }
-
-  void _loadBannerAd() {
-    _bannerAd = BannerAd(
-      adUnitId: 'ca-app-pub-2471654882666627/4988722549', // Banner ad unit ID
-      size: AdSize.banner,
-      request: const AdRequest(),
-      listener: BannerAdListener(
-        onAdLoaded: (ad) {
-          setState(() {
-            _isBannerAdLoaded = true;
-          });
-        },
-        onAdFailedToLoad: (ad, error) {
-          ad.dispose();
-          print('Ad failed to load: $error');
-        },
-      ),
-    );
-    _bannerAd!.load();
-  }
 }
 
 class Particle {
-  double x, y, vx, vy;
-  Color color;
-  double life;
-  static const double gravity = 500;
-  static const double friction = 0.98;
+  double x;
+  double y;
+  double vx;
+  double vy;
+  final Color color;
+  double opacity = 1.0;
 
   Particle({
     required this.x,
@@ -827,28 +1234,38 @@ class Particle {
     required this.vx,
     required this.vy,
     required this.color,
-    required this.life,
   });
 
-  void update() {
-    x += vx * 0.016; // 60 FPS
+  bool update() {
+    x += vx * 0.016;
     y += vy * 0.016;
-    vy += gravity * 0.016;
-    vx *= friction;
-    vy *= friction;
-    life -= 0.02;
+    vy += 220 * 0.016;
+    vx *= 0.97;
+    vy *= 0.97;
+    opacity -= 0.025;
+    return opacity <= 0;
   }
 
   Widget build() {
     return Positioned(
-      left: x - 4,
-      top: y - 4,
+      left: x,
+      top: y,
       child: Opacity(
-        opacity: life,
+        opacity: opacity.clamp(0.0, 1.0),
         child: Container(
           width: 8,
           height: 8,
-          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            boxShadow: [
+              BoxShadow(
+                color: color.withValues(alpha: 0.8),
+                blurRadius: 4,
+                spreadRadius: 1,
+              ),
+            ],
+          ),
         ),
       ),
     );
