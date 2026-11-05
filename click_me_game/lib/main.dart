@@ -7,6 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'ad_config.dart';
+import 'consent_manager.dart';
+
 enum GameMode { endless, timed }
 
 enum ButtonType { clickMe, dontClickMe, bonus, shieldButton, trap }
@@ -15,7 +18,16 @@ enum PowerUpType { doubleScore, slowMotion, shield }
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  MobileAds.instance.initialize();
+  // MobileAds is initialized later, once the consent check allows ads.
+  // During development, configure a test device and use the Google-provided
+  // test banner ad unit so AdMob serves test ads on your phone. Replace
+  // 'TEST_DEVICE_ID' with the ID printed in your debug logs when an ad
+  // request runs (or leave empty to only use the test unit id).
+  if (kDebugMode) {
+    MobileAds.instance.updateRequestConfiguration(
+      RequestConfiguration(testDeviceIds: <String>['TEST_DEVICE_ID']),
+    );
+  }
   runApp(const ClickMeGameApp());
 }
 
@@ -91,6 +103,15 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
   BannerAd? _bannerAd;
   bool _isBannerAdLoaded = false;
 
+  // Keeps the game button away from the banner, so fast tapping can't land on
+  // the ad by accident (AdMob treats accidental clicks as invalid traffic).
+  static const double _adClearance = 48;
+  static const double _minButtonTop = 120;
+  final GlobalKey _gameAreaKey = GlobalKey();
+
+  bool _adsStarted = false;
+  bool _showPrivacyOptions = false;
+
   bool _missionScore20 = false;
   bool _missionCombo5 = false;
   bool _missionLevel3 = false;
@@ -104,7 +125,22 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
     super.initState();
     _initializeAnimations();
     _loadHighScores();
-    _loadBannerAd();
+    ConsentManager.gatherConsent(_onConsentChanged);
+  }
+
+  Future<void> _onConsentChanged() async {
+    final showPrivacyOptions = await ConsentManager.isPrivacyOptionsRequired();
+    if (!mounted) return;
+    setState(() {
+      _showPrivacyOptions = showPrivacyOptions;
+    });
+
+    // This runs more than once, so make sure ads only start the first time.
+    final canRequestAds = await ConsentManager.canRequestAds();
+    if (_adsStarted || !canRequestAds) return;
+    _adsStarted = true;
+    await MobileAds.instance.initialize();
+    if (mounted) _loadBannerAd();
   }
 
   void _initializeAnimations() {
@@ -239,9 +275,8 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
   }
 
   void _loadBannerAd() {
-    const adUnitId = 'ca-app-pub-2471654882666627/6904439444';
     _bannerAd = BannerAd(
-      adUnitId: adUnitId,
+      adUnitId: AdConfig.bannerAdUnitId,
       size: AdSize.banner,
       request: const AdRequest(),
       listener: BannerAdListener(
@@ -292,14 +327,22 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
 
   void _moveButton() {
     final screenSize = MediaQuery.of(context).size;
-    final maxTop = screenSize.height - 260;
     final maxLeft = screenSize.width - 120;
+    final buttonSize = max<double>(70, 110 - (_level * 4));
+
+    // The button is positioned inside the game area, which ends where the
+    // banner starts, so measure that area rather than the whole screen.
+    final gameAreaHeight =
+        _gameAreaKey.currentContext?.size?.height ?? screenSize.height - 260;
+    final maxTop = gameAreaHeight - buttonSize - _adClearance;
 
     setState(() {
       _buttonType = _chooseButtonType();
-      _top = 120 + _random.nextDouble() * max(0, maxTop - 120);
+      _top =
+          _minButtonTop +
+          _random.nextDouble() * max(0, maxTop - _minButtonTop);
       _left = 24 + _random.nextDouble() * max(0, maxLeft - 24);
-      _buttonSize = max(70, 110 - (_level * 4));
+      _buttonSize = buttonSize;
       _buttonDisplayTime = max(900, 2200 - (_level * 170));
       _backgroundColor = _generateColor();
       _buttonColor = _buttonTypeColor(_buttonType);
@@ -650,32 +693,53 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
-              'Click Me',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 36,
-                fontWeight: FontWeight.bold,
+            Expanded(
+              child: SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Click Me',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 36,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Select mode, choose missions, then tap play.',
+                      style: TextStyle(
+                        color: const Color.fromARGB(179, 183, 209, 205),
+                        fontSize: 16,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    _buildModeSelector(),
+                    const SizedBox(height: 24),
+                    _buildMissionPanel(),
+                    const SizedBox(height: 24),
+                    _buildHighScorePanel(),
+                    const SizedBox(height: 24),
+                    _buildInstructionsPanel(),
+                    const SizedBox(height: 14),
+                  ],
+                ),
               ),
             ),
-            const SizedBox(height: 12),
-            Text(
-              'Select mode, choose missions, then tap play.',
-              style: TextStyle(
-                color: const Color.fromARGB(179, 183, 209, 205),
-                fontSize: 16,
+            if (_showPrivacyOptions)
+              Center(
+                child: TextButton(
+                  onPressed: ConsentManager.showPrivacyOptions,
+                  child: const Text(
+                    'Privacy settings',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(height: 24),
-            _buildModeSelector(),
-            const SizedBox(height: 24),
-            _buildMissionPanel(),
-            const SizedBox(height: 24),
-            _buildInstructionsPanel(),
-            const Spacer(),
-            _buildHighScorePanel(),
-            const SizedBox(height: 16),
-            _buildButtonsRow(),
+            SafeArea(top: false, bottom: true, child: _buildButtonsRow()),
           ],
         ),
       ),
@@ -1078,6 +1142,7 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
         ),
         Expanded(
           child: Stack(
+            key: _gameAreaKey,
             children: [
               if (!_gameOver && !_gamePaused)
                 Positioned(
@@ -1129,10 +1194,14 @@ class _ClickMeGameScreenState extends State<ClickMeGameScreen>
           ),
         ),
         if (_isBannerAdLoaded && _bannerAd != null)
-          SizedBox(
-            width: _bannerAd!.size.width.toDouble(),
-            height: _bannerAd!.size.height.toDouble(),
-            child: AdWidget(ad: _bannerAd!),
+          // SafeArea keeps the ad clear of the phone's navigation bar.
+          SafeArea(
+            top: false,
+            child: SizedBox(
+              width: _bannerAd!.size.width.toDouble(),
+              height: _bannerAd!.size.height.toDouble(),
+              child: AdWidget(ad: _bannerAd!),
+            ),
           ),
       ],
     );
